@@ -14,9 +14,9 @@ use mio::util::Slab;
 use mio::buf::RingBuf;
 
 const ENDPOINT: &'static str = "127.0.0.1:6666";
-const DESTINATION: &'static str = "127.0.0.1:22";
+const DESTINATION: &'static str = "127.0.0.1:80";
 
-const BUF_SIZE: usize = 131072;
+const BUF_SIZE: usize = 16384;
 const INVALID: Token = Token(0);
 const ACCEPTOR: Token = Token(1);
 const FLOW: Token = Token(2);
@@ -43,6 +43,9 @@ struct Flow {
     // set of events we are interested in
     interest: EventSet,
 
+    // when set to true, the flow is only allowed to finish writing
+    dead: bool,
+
     // octets in transit
     buf: RingBuf,
 }
@@ -66,6 +69,7 @@ impl Flow {
             token: token,
             peer_token: INVALID,
             interest: EventSet::readable() | EventSet::hup() | EventSet::error(),
+            dead: false,
             buf: RingBuf::new(BUF_SIZE)
         }
     }
@@ -76,10 +80,11 @@ impl Flow {
             token: token,
             peer_token: peer_token,
             interest: EventSet::readable() | EventSet::hup() | EventSet::error(),
+            dead: false,
             buf: RingBuf::new(BUF_SIZE)
         }
     }
-    
+
     /// Register flow interest in read events with the event_loop.
     ///
     /// This will let our connection accept reads starting next event loop tick.
@@ -177,7 +182,9 @@ impl Flow {
             },
 
             _ => {
-                self.interest = self.interest | EventSet::readable();
+                if !self.dead {
+                    self.interest = self.interest | EventSet::readable();
+                }
             }
         }
     }
@@ -188,7 +195,7 @@ impl Flow {
         match self.sock.try_read_buf(&mut self.buf) {
             Ok(Some(0)) => {
                 debug!("Successful read of zero bytes from token {:?}", token);
-                Err(Error::new(ErrorKind::Other, "Could not pop send queue"))
+                Err(Error::new(ErrorKind::Other, format!("EOF for token {:?}", token)))
             },
             Ok(Some(n)) => {
                 debug!("Successfully read {} bytes from {:?}, buf size: {}",
@@ -211,14 +218,18 @@ impl Flow {
     ///
     fn write_flow(&mut self, token: Token, peer_buf: &mut RingBuf) -> io::Result<BufState> {
         if peer_buf.is_empty() {
-            warn!("Peer read buf is empty, skip writing for token {:?}", token);
-            // do not spam us with write events, until peer produces something in their read buffer:
-            self.interest = self.interest & !EventSet::writable();
-            Ok(BufState::Data)
+            if self.dead && self.buf.is_empty() {
+                Ok(BufState::Empty)
+            } else {
+                warn!("Peer read buf is empty, skip writing for token {:?}", token);
+                // do not spam us with write events, until peer produces something in their read buffer:
+                self.interest = self.interest & !EventSet::writable();
+                Ok(BufState::Data)
+            }
         } else {
             match self.sock.try_write_buf(peer_buf) {
                 Ok(Some(n)) => {
-                    debug!("Wrote {} bytes to token {:?}", n, token);
+                    debug!("Successfully wrote {} bytes to token {:?}", n, token);
                     Ok(self.write_interest(n))
                 },
                 Ok(None) => {
@@ -233,6 +244,17 @@ impl Flow {
         }
     }
 
+    fn disable_flow(&mut self, event_loop: &mut EventLoop<Nexus>) -> io::Result<()> {
+        if self.dead {
+            Err(Error::new(
+                ErrorKind::Other,
+                format!("Cannot disable token {:?} because it's already disabled", self.token)))
+        } else {
+            self.dead = true;
+            self.interest = EventSet::writable();
+            self.reregister(event_loop)
+        }
+    }
 }
 
 impl Nexus {
@@ -375,6 +397,26 @@ impl Nexus {
         self.reregister(event_loop);
     }
 
+    fn disable_flow(&mut self, token: Token, event_loop: &mut EventLoop<Nexus>) {
+        let peer_token = self.find_connection_by_token(token).peer_token;
+        debug!("Disabling flow {:?}+{:?}", token, peer_token);
+        match self.find_connection_by_token(token).disable_flow(event_loop) {
+            Ok(_) => {
+                match self.find_connection_by_token(peer_token).disable_flow(event_loop) {
+                    Ok(_) => (),
+                    Err(e) => {
+                        warn!("Unable to disable flow {:?} due to {:?}", peer_token, e);
+                        self.stop_flow(token);
+                    }
+                }
+            },
+            Err(e) => {
+                warn!("Unable to disable flow {:?} due to {:?}", token, e);
+                self.stop_flow(token);
+            }
+        }
+    }
+    
     fn stop_flow(&mut self, token: Token) {
         let peer_token = self.find_connection_by_token(token).peer_token;
         debug!("Stopping flow {:?}+{:?}", token, peer_token);
@@ -421,26 +463,39 @@ impl Nexus {
         }
     }
 
-    fn last(&mut self, token: Token) -> io::Result<BufState> {
-        debug!("Handling write for token {:?}", token);
+    fn handle_write(&mut self, token: Token, event_loop: &mut EventLoop<Nexus>) {
+
+        if !self.conns.contains(token) {
+            debug!("Spurious write for non-existent token: {:?}", token);
+            return;
+        }
+        
         let peer_token = self.conns[token].peer_token;
-        let mut f1 = self.conns.remove(peer_token).unwrap();
-        let result = self.conns[token].write_flow(token, &mut f1.buf);
-        match self.conns.insert_with(|new_token| {
-            debug!("Updated token {:?}", new_token);
-            f1
-        }) {
-            Some(new_token) => {
-                self.conns[token].peer_token = new_token;
-                result
+        let mut peer_buf = std::mem::replace(&mut self.conns[peer_token].buf, RingBuf::new(0));
+        let write_result = self.conns[token].write_flow(token, &mut peer_buf);
+        std::mem::replace(&mut self.conns[peer_token].buf, peer_buf);
+
+        match write_result {
+            Ok(BufState::Empty) => {
+                debug!("Graceful stop for token {:?}", token);
+                self.stop_flow(token);
+                return;
+            },
+            Ok(buf_state) => {
+                match self.flow_state2(buf_state, token, event_loop) {
+                    Ok(_) => (),
+                    Err(e) => {
+                        error!("flow_state2 failed for token {:?} with error {:?}", token, e);
+                        self.disable_flow(token, event_loop);
+                    }
+                }
             },
 
-            None => {
-                warn!("Re-insert into the matrix failed for {:?}", token);
-                Err(Error::new(ErrorKind::Other, "Matrix re-insertion failure"))
+            Err(e) => {
+                debug!("Write failed for token {:?} due to {:?}", token, e);
+                self.disable_flow(token, event_loop);
             }
         }
-
     }
     
     /// Find a connection in the slab using the given token.
@@ -458,9 +513,10 @@ impl Handler for Nexus {
 
         debug!("READY {:?} {:?}", token, events);
 
-        if events.is_error() || events.is_hup() {
+        //if events.is_error() || events.is_hup() {
+        if events.is_error() {
             warn!("Final event {:?} for token {:?}", events, token);
-            self.stop_flow(token);
+            self.disable_flow(token, event_loop);
             return;
         }
 
@@ -470,13 +526,7 @@ impl Handler for Nexus {
             debug!("Write event for {:?}", token);
             assert!(self.token != token, "Received writable event for Server");
 
-            self.last(token)
-            //self.find_connection_by_token(token).write_flow(token, &mut buf)
-                .and_then(|buf_state| self.flow_state2(buf_state, token, event_loop))
-                .unwrap_or_else(|e| {
-                    warn!("write_dlow error {:?}, {:?}", e, token);
-                    self.stop_flow(token);
-                });
+            self.handle_write(token, event_loop);
         }
         
         // A read event for our `Server` token means we are establishing a new connection. A read
@@ -490,7 +540,7 @@ impl Handler for Nexus {
                     .and_then(|buf_state| self.flow_state(buf_state, token, event_loop))
                     .unwrap_or_else(|e| {
                         warn!("read_flow error {:?} for token {:?}", e, token);
-                        self.stop_flow(token);
+                        self.disable_flow(token, event_loop);
                     });
             }
         }
