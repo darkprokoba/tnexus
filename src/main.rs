@@ -1,5 +1,8 @@
 extern crate mio;
-#[macro_use] extern crate log;
+
+#[macro_use]
+extern crate log;
+
 extern crate env_logger;
 
 use std::io;
@@ -13,7 +16,7 @@ use mio::buf::RingBuf;
 const ENDPOINT: &'static str = "127.0.0.1:6666";
 const DESTINATION: &'static str = "127.0.0.1:22";
 
-const BUF_SIZE: usize = 2048;
+const BUF_SIZE: usize = 131072;
 const INVALID: Token = Token(0);
 const ACCEPTOR: Token = Token(1);
 const FLOW: Token = Token(2);
