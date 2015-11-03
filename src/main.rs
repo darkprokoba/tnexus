@@ -16,7 +16,7 @@ use mio::buf::RingBuf;
 const ENDPOINT: &'static str = "127.0.0.1:6666";
 const DESTINATION: &'static str = "127.0.0.1:80";
 
-const BUF_SIZE: usize = 16384;
+const BUF_SIZE: usize = 131072;
 const INVALID: Token = Token(0);
 const ACCEPTOR: Token = Token(1);
 const FLOW: Token = Token(2);
@@ -56,6 +56,9 @@ struct Nexus {
 
     // token of our acceptor.
     token: Token,
+
+    // a hack for defeating the borrow checker
+    empty_buf: RingBuf,
     
     // a list of all inbound and outbound connections
     conns: Slab<Flow>,
@@ -268,6 +271,8 @@ impl Nexus {
             // going on.
             token: ACCEPTOR,
 
+            empty_buf: RingBuf::new(0),
+            
             // SERVER is Token(1), so start after that
             // we can deal with a max of 126 connections
             conns: Slab::new_starting_at(FLOW, 128)
@@ -444,8 +449,9 @@ impl Nexus {
         }
     }
 
-    fn flow_state2(&mut self, state: BufState, token: Token, event_loop: &mut EventLoop<Nexus>) -> io::Result<()> {
-        let peer_token = self.find_connection_by_token(token).peer_token;
+    fn flow_state2(&mut self, state: BufState,
+                   token: Token, peer_token: Token,
+                   event_loop: &mut EventLoop<Nexus>) -> io::Result<()> {
        
         debug!("Re-registering flow {:?}+{:?} after write, inbound buf state: {:?}",
                token, peer_token, state);
@@ -471,9 +477,9 @@ impl Nexus {
         }
         
         let peer_token = self.conns[token].peer_token;
-        let mut peer_buf = std::mem::replace(&mut self.conns[peer_token].buf, RingBuf::new(0));
-        let write_result = self.conns[token].write_flow(token, &mut peer_buf);
-        std::mem::replace(&mut self.conns[peer_token].buf, peer_buf);
+        std::mem::swap(&mut self.conns[peer_token].buf, &mut self.empty_buf);
+        let write_result = self.conns[token].write_flow(token, &mut self.empty_buf);
+        std::mem::swap(&mut self.conns[peer_token].buf, &mut self.empty_buf);
 
         match write_result {
             Ok(BufState::Empty) => {
@@ -482,7 +488,7 @@ impl Nexus {
                 return;
             },
             Ok(buf_state) => {
-                match self.flow_state2(buf_state, token, event_loop) {
+                match self.flow_state2(buf_state, token, peer_token, event_loop) {
                     Ok(_) => (),
                     Err(e) => {
                         error!("flow_state2 failed for token {:?} with error {:?}", token, e);
