@@ -391,7 +391,17 @@ impl Handler for Nexus {
             debug!("Write event for {:X}", tokval);
             assert!(self.token != token, "Received writable event for Server");
 
-            if !self.find_connection_by_token(token).write(inb, event_loop) {
+            let write_result = match self.conns.get_mut(token) {
+                None => {
+                    warn!("Unknown token {:X}", tokval);
+                    return;
+                },
+                Some(flow) => {
+                    flow.write(inb, event_loop)
+                }
+            };
+
+            if !write_result {
                 self.stop_flow(token);
                 return;
             }
