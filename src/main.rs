@@ -16,8 +16,9 @@ use mio::buf::RingBuf;
 const ENDPOINT: &'static str = "127.0.0.1:6666";
 const DESTINATION: &'static str = "127.0.0.1:80";
 
-const BUF_SIZE: usize = 524288; //131072;
+//const BUF_SIZE: usize = 524288; //131072;
 //const BUF_SIZE: usize = 8388608;
+const BUF_SIZE: usize = 1048576;
 
 const INVALID: Token = Token(0);
 const ACCEPTOR: Token = Token(1);
@@ -25,12 +26,6 @@ const FLOW: Token = Token(2);
 
 const OUTMASK: usize = 2147483648; //2 ** 31
 const NOTMASK: usize = !OUTMASK;
-
-enum ReadResult {
-    Write,
-    Noop,
-    Stop,
-}
 
 struct Conn {
     // socket
@@ -136,7 +131,7 @@ impl Flow {
     /// Handle flow read event from event loop.
     ///
     #[inline]
-    fn read(&mut self, inbo: bool, event_loop: &mut EventLoop<Nexus>) -> ReadResult {
+    fn read(&mut self, inbo: bool, event_loop: &mut EventLoop<Nexus>) -> bool {
 
         let conn;
         let peer;
@@ -147,44 +142,8 @@ impl Flow {
             conn = &mut self.out;
             peer = &mut self.inb;
         }
-        
-        loop {
-            match conn.sock.try_read_buf(&mut conn.buf) {
-                Ok(Some(0)) => {
-                    debug!("Successful read of zero bytes (i.e. EOF) from token {:?}", conn.token);
-                    conn.dead = true;
-                    conn.sock.shutdown(Shutdown::Write);
-                    if peer.dead == true {
-                        return ReadResult::Stop;
-                    } else {
-                        return if peer.writable {ReadResult::Write} else {ReadResult::Noop};
-                    }
-                },
-                Ok(Some(n)) => {
-                    debug!("Successfully read {} bytes from {:?}, buf size: {}",
-                           n, conn.token, <RingBuf as Buf>::remaining(&conn.buf));
-                    //if !peer.interest.is_writable() {
-                    //    peer.interest = peer.interest | EventSet::writable();
-                    //    peer.reregister(event_loop);
-                    //}
-                    if conn.buf.is_full() {
-                        warn!("buffer full for {:?}", conn.token);
-                        conn.interest = conn.interest & !EventSet::readable();
-                        conn.reregister(event_loop);
-                        return if peer.writable {ReadResult::Write} else {ReadResult::Noop};
-                    }
-                },
-                Ok(None) => {
-                    debug!("Spurious event for token {:?}", conn.token);
-                    return if peer.writable {ReadResult::Write} else {ReadResult::Noop};
-                },
-                Err(e) => {
-                    warn!("Read failure {:?} on token {:?}", e, conn.token);
-                    conn.dead = true;
-                    return if peer.writable {ReadResult::Write} else {ReadResult::Noop};
-                }
-            }
-        }
+
+        read1(conn, peer, event_loop)
     }
 
     #[inline]
@@ -198,47 +157,90 @@ impl Flow {
             conn = &mut self.out;
             peer = &mut self.inb;
         }
-        
-        if peer.buf.is_empty() {
-            if conn.dead && conn.buf.is_empty() {
-                return false;
-            }
-        }
 
         conn.writable = true;
 
-        loop {
+        write1(conn, peer, event_loop)
+    }
+}
 
-            if peer.buf.is_empty() {
-                if !peer.interest.is_readable() {
-                    peer.interest = peer.interest | EventSet::readable();
-                    peer.reregister(event_loop);
+fn read1(conn: &mut Conn, peer: &mut Conn, event_loop: &mut EventLoop<Nexus>) -> bool {
+    loop {
+        match conn.sock.try_read_buf(&mut conn.buf) {
+            Ok(Some(0)) => {
+                debug!("Successful read of zero bytes (i.e. EOF) from token {:?}", conn.token);
+                conn.dead = true;
+                conn.sock.shutdown(Shutdown::Write);
+                if peer.dead == true {
+                    return false;
+                } else {
+                    return true;
                 }
+            },
+            Ok(Some(n)) => {
+                debug!("Successfully read {} bytes from {:?}, buf size: {}",
+                       n, conn.token, <RingBuf as Buf>::remaining(&conn.buf));
+                if peer.writable {
+                    write1(peer, conn, event_loop);
+                }
+                if conn.buf.is_full() {
+                    warn!("Suspending reads due to buffer full for {:?}", conn.token);
+                    conn.interest = conn.interest & !EventSet::readable();
+                    conn.reregister(event_loop);
+                    return true;
+                }
+            },
+            Ok(None) => {
+                debug!("Done reading for token {:?}", conn.token);
+                return true;
+            },
+            Err(e) => {
+                warn!("Read failure {:?} on token {:?}", e, conn.token);
+                conn.dead = true;
                 return true;
             }
+        }
+    }
+}
+
+fn write1(conn: &mut Conn, peer: &mut Conn, event_loop: &mut EventLoop<Nexus>) -> bool {
+    if peer.buf.is_empty() {
+        if conn.dead && conn.buf.is_empty() {
+            return false;
+        }
+    }
+
+    loop {
+        
+        if peer.buf.is_empty() {
+            if !peer.interest.is_readable() {
+                peer.interest = peer.interest | EventSet::readable();
+                peer.reregister(event_loop);
+            }
+            return true;
+        }
             
-            match conn.sock.try_write_buf(&mut peer.buf) {
-                Ok(Some(n)) => {
-                    debug!("Successfully wrote {} bytes to token {:?}", n, conn.token);
-                    if n == 0 {
-                        if !peer.interest.is_readable() {
-                            peer.interest = peer.interest | EventSet::readable();
-                            peer.reregister(event_loop);
-                        }
-                        //conn.writable = false;
-                        return true;
+        match conn.sock.try_write_buf(&mut peer.buf) {
+            Ok(Some(n)) => {
+                debug!("Successfully wrote {} bytes to token {:?}", n, conn.token);
+                if n == 0 {
+                    if !peer.interest.is_readable() {
+                        peer.interest = peer.interest | EventSet::readable();
+                        peer.reregister(event_loop);
                     }
-                },
-                Ok(None) => {
-                    debug!("Write not accepted");
-                    conn.writable = false;
+                    //conn.writable = false;
                     return true;
-                },
-                Err(e) => {
-                    warn!("Write failure {:?} on token {:?}", e, conn.token);
-                    conn.writable = false;
-                    return false;
                 }
+            },
+            Ok(None) => {
+                debug!("Write not accepted");
+                conn.writable = false;
+                return true;
+            },
+            Err(e) => {
+                warn!("Write failure {:?} on token {:?}", e, conn.token);
+                conn.writable = false;
+                return false;
             }
         }
     }
@@ -345,6 +347,22 @@ impl Nexus {
     fn find_connection_by_token<'a>(&'a mut self, token: Token) -> &'a mut Flow {
         &mut self.conns[token]
     }
+
+    /*
+    fn with_flow<F, R>(&mut self, token: Token, mut closure: F) -> Option<R>
+        where F: FnMut(&mut Flow) -> R {
+
+        match self.conns.get_mut(token) {
+            None => {
+                warn!("Token not found: {:?}", token);
+                None
+            },
+            Some(flow) => {
+                Some(closure(flow))
+            }
+        }
+    }
+    */
 }
 
 impl Handler for Nexus {
@@ -358,7 +376,7 @@ impl Handler for Nexus {
         let inb = tokval & OUTMASK == 0;
         let token = Token(tokval & NOTMASK);
         
-        debug!("READY {} {} {:?} {:?}", tokval, inb, token, events);
+        debug!("READY {:X} {} {:?} {:?}", tokval, inb, token, events);
 
         //if events.is_error() || events.is_hup() {
         if events.is_error() {
@@ -370,14 +388,9 @@ impl Handler for Nexus {
         // We never expect a write event for our `Server` token . A write event for any other token
         // should be handed off to that connection.
         if events.is_writable() {
-            debug!("Write event for {:?}", token);
+            debug!("Write event for {:X}", tokval);
             assert!(self.token != token, "Received writable event for Server");
 
-            if !self.conns.contains(token) {
-                debug!("token missing in action: {}", tokval);
-                return;
-            }
-            
             if !self.find_connection_by_token(token).write(inb, event_loop) {
                 self.stop_flow(token);
                 return;
@@ -390,17 +403,8 @@ impl Handler for Nexus {
             if ACCEPTOR == token {
                 self.accept(event_loop);
             } else {
-                match self.find_connection_by_token(token).read(inb, event_loop) {
-                    ReadResult::Write => {
-                        if !self.find_connection_by_token(token).write(!inb, event_loop) {
-                            self.stop_flow(token);
-                            return;
-                        }
-                    },
-                    ReadResult::Noop => (),
-                    ReadResult::Stop => {
-                        self.stop_flow(token);
-                    }
+                if !self.find_connection_by_token(token).read(inb, event_loop) {
+                    self.stop_flow(token);
                 }
             }
         }
