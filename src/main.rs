@@ -6,10 +6,9 @@ extern crate log;
 extern crate env_logger;
 
 use std::io;
-//use std::io::{Error, ErrorKind};
 use std::net::SocketAddr;
 use mio::*;
-use mio::tcp::{TcpListener, TcpStream, Shutdown};
+use mio::tcp::{TcpListener, TcpStream};
 use mio::util::Slab;
 use mio::buf::RingBuf;
 
@@ -40,7 +39,7 @@ struct Conn {
     // whether the remote peer has half-closed the socket
     // i.e. reading makes no more sense
     dead: bool,
-
+    
     // whether the socket can accept writes right now
     writable: bool,
 
@@ -170,10 +169,14 @@ fn read1(conn: &mut Conn, peer: &mut Conn, event_loop: &mut EventLoop<Nexus>) ->
             Ok(Some(0)) => {
                 debug!("Successful read of zero bytes (i.e. EOF) from token {:?}", conn.token);
                 conn.dead = true;
-                conn.sock.shutdown(Shutdown::Write);
-                if peer.dead == true {
+                if peer.dead == true && conn.buf.is_empty() && peer.buf.is_empty() {
+                	//we're all done:
+                	debug!("All done {:?}", conn.token);
                     return false;
                 } else {
+                    debug!("Suspending reads due to EOF for {:?}", conn.token);
+                    conn.interest = conn.interest & !EventSet::readable();
+                    conn.reregister(event_loop);
                     return true;
                 }
             },
@@ -197,7 +200,9 @@ fn read1(conn: &mut Conn, peer: &mut Conn, event_loop: &mut EventLoop<Nexus>) ->
             Err(e) => {
                 warn!("Read failure {:?} on token {:?}", e, conn.token);
                 conn.dead = true;
-                return true;
+                conn.interest = conn.interest & !EventSet::readable();
+                conn.reregister(event_loop);
+	            return true;
             }
         }
     }
@@ -223,14 +228,6 @@ fn write1(conn: &mut Conn, peer: &mut Conn, event_loop: &mut EventLoop<Nexus>) -
         match conn.sock.try_write_buf(&mut peer.buf) {
             Ok(Some(n)) => {
                 debug!("Successfully wrote {} bytes to token {:?}", n, conn.token);
-                if n == 0 {
-                    if !peer.interest.is_readable() {
-                        peer.interest = peer.interest | EventSet::readable();
-                        peer.reregister(event_loop);
-                    }
-                    //conn.writable = false;
-                    return true;
-                }
             },
             Ok(None) => {
                 debug!("Write not accepted");
@@ -293,15 +290,13 @@ impl Nexus {
                 match s {
                     Some(sock) => sock,
                     None => {
-                        error!("Failed to accept new socket");
-                        //self.reregister(event_loop);
+                        debug!("No more new sockets");
                         return;
                     }
                 }
             },
             Err(e) => {
                 error!("Failed to accept new socket, {:?}", e);
-                //self.reregister(event_loop);
                 return;
             }
         };
@@ -334,8 +329,6 @@ impl Nexus {
         };
 
         }
-        // We are using edge-triggered polling. Even our SERVER token needs to reregister.
-        // self.reregister(event_loop);
     }
 
     fn stop_flow(&mut self, token: Token) {
@@ -378,11 +371,8 @@ impl Handler for Nexus {
         
         debug!("READY {:X} {} {:?} {:?}", tokval, inb, token, events);
 
-        //if events.is_error() || events.is_hup() {
         if events.is_error() {
-            warn!("Final event {:?} for token {}", events, tokval);
-            //self.disable_flow(token, event_loop);
-            return;
+            warn!("Final event {:?} for token {:X}", events, tokval);
         }
 
         // We never expect a write event for our `Server` token . A write event for any other token
