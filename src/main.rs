@@ -13,7 +13,7 @@ use mio::util::Slab;
 use mio::buf::RingBuf;
 
 const ENDPOINT: &'static str = "127.0.0.1:6666";
-const DESTINATION: &'static str = "127.0.0.1:80";
+const DESTINATION: &'static str = "127.0.0.1:443";
 
 //const BUF_SIZE: usize = 524288; //131072;
 //const BUF_SIZE: usize = 8388608;
@@ -26,6 +26,8 @@ const FLOW: Token = Token(2);
 const OUTMASK: usize = 2147483648; //2 ** 31
 const NOTMASK: usize = !OUTMASK;
 
+mod tls;
+
 struct Conn {
     // socket
     sock: TcpStream,
@@ -35,6 +37,8 @@ struct Conn {
 
     // set of events we are interested in
     interest: EventSet,
+
+    read_something: bool,
 
     // whether the remote peer has half-closed the socket
     // i.e. reading makes no more sense
@@ -76,6 +80,7 @@ impl Conn {
             sock: sock,
             token: token,
             interest: EventSet::all(),
+            read_something: false,
             dead: false,
             writable: false,
             buf: RingBuf::new(BUF_SIZE),
@@ -181,8 +186,26 @@ fn read1(conn: &mut Conn, peer: &mut Conn, event_loop: &mut EventLoop<Nexus>) ->
                 }
             },
             Ok(Some(n)) => {
+            	let remaining = <RingBuf as Buf>::remaining(&conn.buf);
                 debug!("Successfully read {} bytes from {:?}, buf size: {}",
-                       n, conn.token, <RingBuf as Buf>::remaining(&conn.buf));
+                       n, conn.token, remaining);
+                if !conn.read_something {
+                	match tls::parse_tls_client_hello(&conn.buf.bytes()) {
+                		None => (),
+                		Some(x) => {
+                			conn.read_something = true;
+                			match x {
+                				None => {
+                					debug!("Not a TLS/SNI connection");
+                				},
+                				Some(sname) => {
+                					debug!("SNI detected on {:?}: '{}'", conn.token, sname);
+                				},
+                			}
+                		}
+                	} 
+                }
+
                 if peer.writable {
                     write1(peer, conn, event_loop);
                 }
