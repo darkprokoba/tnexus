@@ -12,8 +12,7 @@ use mio::tcp::{TcpListener, TcpStream};
 use mio::util::Slab;
 use mio::buf::RingBuf;
 
-const ENDPOINT: &'static str = "127.0.0.1:6666";
-const DESTINATION: &'static str = "127.0.0.1:80";
+const DESTINATION: &'static str = "127.0.0.1:22";
 
 //const BUF_SIZE: usize = 524288; //131072;
 //const BUF_SIZE: usize = 8388608;
@@ -26,6 +25,7 @@ const FLOW: Token = Token(2);
 const OUTMASK: usize = 2147483648; //2 ** 31
 const NOTMASK: usize = !OUTMASK;
 
+mod cmdline;
 mod tls;
 
 struct Conn {
@@ -56,7 +56,7 @@ struct Flow {
 
     // inbound connection
     inb: Conn,
-
+    
     // outbound connection
     out: Option<Conn>,
 }
@@ -70,6 +70,8 @@ struct Nexus {
 
     // a list of all inbound and outbound connections
     conns: Slab<Flow>,
+
+    destination: SocketAddr,
 }
 
 impl Conn {
@@ -326,7 +328,7 @@ fn write1(conn: &mut Conn, peer: &mut Conn, event_loop: &mut EventLoop<Nexus>) -
 }
 
 impl Nexus {
-    fn new(acceptor: TcpListener) -> Nexus {
+    fn new(acceptor: TcpListener, destination: SocketAddr) -> Nexus {
         Nexus {
             acceptor: acceptor,
 
@@ -338,7 +340,9 @@ impl Nexus {
 
             // SERVER is Token(1), so start after that
             // we can deal with a max of 126 connections
-            conns: Slab::new_starting_at(FLOW, 128)
+            conns: Slab::new_starting_at(FLOW, 128),
+
+            destination: destination,
         }
     }
 
@@ -498,8 +502,13 @@ fn main() {
 
     info!("Starting tnexus...");
     
-    let endpoint_addr: SocketAddr = ENDPOINT.parse()
+	let args = cmdline::get_args();
+
+    let endpoint_addr: SocketAddr = args.listen.parse()
         .ok().expect("Failed to parse server enpoint");
+
+    let destination_addr: SocketAddr = args.destination.parse()
+        .ok().expect("Failed to parse destination enpoint");
 
     // Setup the acceptor socket
     let acceptor = TcpListener::bind(&endpoint_addr)
@@ -509,7 +518,7 @@ fn main() {
     let mut event_loop = EventLoop::new()
         .ok().expect("Could not initialize MIO event loop");
 
-    let mut nexus = Nexus::new(acceptor);
+    let mut nexus = Nexus::new(acceptor, destination_addr);
 
     // Start listening for incoming connections
     nexus.register(&mut event_loop)
