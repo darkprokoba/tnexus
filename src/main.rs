@@ -12,8 +12,6 @@ use mio::tcp::{TcpListener, TcpStream};
 use mio::util::Slab;
 use mio::buf::RingBuf;
 
-const DESTINATION: &'static str = "127.0.0.1:22";
-
 //const BUF_SIZE: usize = 524288; //131072;
 //const BUF_SIZE: usize = 8388608;
 const BUF_SIZE: usize = 1048576;
@@ -25,8 +23,13 @@ const FLOW: Token = Token(2);
 const OUTMASK: usize = 2147483648; //2 ** 31
 const NOTMASK: usize = !OUTMASK;
 
+const EMPTY_BUF: [u8; 0] = []; 
+
 mod cmdline;
 mod tls;
+mod multiplex;
+
+use multiplex::{Multiplexer, MR, opaque_forwarder, sni_forwarder};
 
 struct Conn {
     // socket
@@ -71,7 +74,7 @@ struct Nexus {
     // a list of all inbound and outbound connections
     conns: Slab<Flow>,
 
-    destination: SocketAddr,
+	multiplexer: Box<Multiplexer>,
 }
 
 impl Conn {
@@ -123,16 +126,8 @@ impl Flow {
         }
     }
 
-    fn set_outbound(&mut self, endpoint: &str, event_loop: &mut EventLoop<Nexus>) -> bool {
+    fn set_outbound2(&mut self, outbound: TcpStream, event_loop: &mut EventLoop<Nexus>) -> bool {
     	
-    	debug!("Selecting outbound endpoint for token {:?} : {}", self.inb.token, endpoint);
-    	
-        let dst_addr: SocketAddr = endpoint.parse()
-            .ok().expect("Failed to parse destination endpoint");
-
-        let outbound = TcpStream::connect(&dst_addr).ok().expect(
-        	"TODO: outbound failure not handled yet");
-        
         let mut out_conn = Conn::new(Token(OUTMASK + self.inb.token.as_usize()), outbound);
         out_conn.register(event_loop).ok().expect("TODO: handle registration failure");
         self.out = Some(out_conn);
@@ -142,40 +137,31 @@ impl Flow {
     	true
     }
 
-    fn read0(&mut self, event_loop: &mut EventLoop<Nexus>) -> bool {
+    fn read0(&mut self, multiplexer: &Box<Multiplexer>, event_loop: &mut EventLoop<Nexus>) -> bool {
    	loop {
         match self.inb.sock.try_read_buf(&mut self.inb.buf) {
             Ok(Some(0)) => {
-                debug!("Successful read of zero bytes (i.e. EOF) from token {:?}", self.inb.token);
+                debug!("[read0] Successful read of zero bytes (i.e. EOF) from token {:?}", self.inb.token);
                 self.inb.dead = true;
-                debug!("[read0] Suspending reads due to EOF for {:?}", self.inb.token);
-                self.inb.interest = self.inb.interest & !EventSet::readable();
-                
-                return self.set_outbound(DESTINATION, event_loop);
+                return false;
             },
             Ok(Some(n)) => {
             	let remaining = <RingBuf as Buf>::remaining(&self.inb.buf);
                 debug!("[read0] Successfully read {} bytes from {:?}, buf size: {}",
                        n, self.inb.token, remaining);
-            	match tls::parse_tls_client_hello(&self.inb.buf.bytes()) {
-            		None => (), //continue reading
-            		Some(result) => {
-            			match result {
-            				None => {
-            					debug!("Not a TLS/SNI connection");
-            					return self.set_outbound(DESTINATION, event_loop);
-            				},
-            				Some(sname) => {
-            					debug!("SNI detected on {:?}: '{}'", self.inb.token, sname);
-            					match sname.as_ref() {
-            						"www.redhat.com" => return self.set_outbound("23.45.109.223:443", event_loop),
-            						_ => return self.set_outbound(DESTINATION, event_loop),
-            					}
-            				},
-            			}
-            		}
+                
+                match multiplexer(&self.inb.buf.bytes()) {
+                	MR::NeedMore => (), //continue reading
+                	MR::Mismatch => {
+    					debug!("[read0] Connection unrecognized, aborting!");
+		                self.inb.dead = true;
+    					return false;
+                	},
+                	MR::Match(destination) => {
+                		return self.set_outbound2(destination, event_loop);
+                	},
                 }
-
+                
                 if self.inb.buf.is_full() {
                     warn!("[read0] Suspending reads due to buffer full for {:?}", self.inb.token);
                     return false;
@@ -188,8 +174,7 @@ impl Flow {
             Err(e) => {
                 warn!("Read failure {:?} on token {:?}", e, self.inb.token);
                 self.inb.dead = true;
-                self.inb.interest = self.inb.interest & !EventSet::readable();
-	            return self.set_outbound(DESTINATION, event_loop);
+	            return false;
             }
         }
     }
@@ -198,13 +183,13 @@ impl Flow {
     /// Handle flow read event from event loop.
     ///
     #[inline]
-    fn read(&mut self, inbo: bool, event_loop: &mut EventLoop<Nexus>) -> bool {
+    fn read(&mut self, inbo: bool, multiplexer: &Box<Multiplexer>, event_loop: &mut EventLoop<Nexus>) -> bool {
 
         if inbo {
             match self.out {
             	Some(ref mut peer) => read1(&mut self.inb, peer, event_loop),
             	None => {
-            		self.read0(event_loop)
+            		self.read0(multiplexer, event_loop)
             	},
             }
         } else {
@@ -258,7 +243,7 @@ fn read1(conn: &mut Conn, peer: &mut Conn, event_loop: &mut EventLoop<Nexus>) ->
                 } else {
                     debug!("Suspending reads due to EOF for {:?}", conn.token);
                     conn.interest = conn.interest & !EventSet::readable();
-                    conn.reregister(event_loop);
+                    conn.reregister(event_loop).ok().expect("TODO: handle re-registration failure");
                     return true;
                 }
             },
@@ -273,7 +258,7 @@ fn read1(conn: &mut Conn, peer: &mut Conn, event_loop: &mut EventLoop<Nexus>) ->
                 if conn.buf.is_full() {
                     warn!("Suspending reads due to buffer full for {:?}", conn.token);
                     conn.interest = conn.interest & !EventSet::readable();
-                    conn.reregister(event_loop);
+                    conn.reregister(event_loop).ok().expect("TODO: handle re-registration failure");
                     return true;
                 }
             },
@@ -285,7 +270,7 @@ fn read1(conn: &mut Conn, peer: &mut Conn, event_loop: &mut EventLoop<Nexus>) ->
                 warn!("Read failure {:?} on token {:?}", e, conn.token);
                 conn.dead = true;
                 conn.interest = conn.interest & !EventSet::readable();
-                conn.reregister(event_loop);
+                conn.reregister(event_loop).ok().expect("TODO: handle re-registration failure");
 	            return true;
             }
         }
@@ -304,7 +289,7 @@ fn write1(conn: &mut Conn, peer: &mut Conn, event_loop: &mut EventLoop<Nexus>) -
         if peer.buf.is_empty() {
             if !peer.interest.is_readable() {
                 peer.interest = peer.interest | EventSet::readable();
-                peer.reregister(event_loop);
+                peer.reregister(event_loop).ok().expect("TODO: handle re-registration failure");
             }
             return true;
         }
@@ -328,7 +313,7 @@ fn write1(conn: &mut Conn, peer: &mut Conn, event_loop: &mut EventLoop<Nexus>) -
 }
 
 impl Nexus {
-    fn new(acceptor: TcpListener, destination: SocketAddr) -> Nexus {
+    fn new(acceptor: TcpListener, multiplexer: Box<Multiplexer>) -> Nexus {
         Nexus {
             acceptor: acceptor,
 
@@ -342,7 +327,7 @@ impl Nexus {
             // we can deal with a max of 126 connections
             conns: Slab::new_starting_at(FLOW, 128),
 
-            destination: destination,
+            multiplexer: multiplexer,
         }
     }
 
@@ -387,11 +372,6 @@ impl Nexus {
             }
         };
 
-//        let dst_addr: SocketAddr = DESTINATION.parse()
-//            .ok().expect("Failed to parse destination endpoint");
-//
-//        let outbound = TcpStream::connect(&dst_addr).ok().expect("outbound failure not handled yet");
-
         match self.conns.insert_with(|token| {
             debug!("Inserting {:?} into slab", token);
             Flow::new(inbound, /*outbound,*/ token)
@@ -400,7 +380,18 @@ impl Nexus {
                 match self.find_connection_by_token(token).inb.register(event_loop) {
                     Ok(_) => {
                         debug!("Registered inbound token {:?}", token);
-                        
+
+                        let mr = {
+	                        let plexer = &self.multiplexer;
+	                        plexer(&EMPTY_BUF)
+                        };
+                        match mr {
+                        	MR::Match(outbound) => {
+                        		//setup outbound immediately!
+                        		self.find_connection_by_token(token).set_outbound2(outbound, event_loop);
+                        	},
+                        	_ => (),
+                        }
                     },
                     Err(e) => {
                         error!("Failed to register inbound {:?} connection with event loop, {:?}", token, e);
@@ -489,9 +480,24 @@ impl Handler for Nexus {
             if ACCEPTOR == token {
                 self.accept(event_loop);
             } else {
-                if !self.find_connection_by_token(token).read(inb, event_loop) {
-                    self.stop_flow(token);
-                }
+    	        let should_stop = match self.conns.get_mut(token) {
+				    None => {
+				        warn!("Ignoring non-existing readable token: {:?}", token);
+	                    false
+				    },
+				    Some(flow) => {
+				        if flow.read(inb, &self.multiplexer, event_loop) {
+				        	false
+				        } else {
+					        warn!("Read returned false for token: {:?}", token);
+				        	true
+				        }
+				    }
+				};
+    	        
+    	        if should_stop {
+    	        	self.stop_flow(token);
+    	        }
             }
         }
     }
@@ -507,9 +513,6 @@ fn main() {
     let endpoint_addr: SocketAddr = args.listen.parse()
         .ok().expect("Failed to parse server enpoint");
 
-    let destination_addr: SocketAddr = args.destination.parse()
-        .ok().expect("Failed to parse destination enpoint");
-
     // Setup the acceptor socket
     let acceptor = TcpListener::bind(&endpoint_addr)
         .ok().expect("Failed to bind server endpoint");
@@ -518,7 +521,9 @@ fn main() {
     let mut event_loop = EventLoop::new()
         .ok().expect("Could not initialize MIO event loop");
 
-    let mut nexus = Nexus::new(acceptor, destination_addr);
+    let mut nexus = Nexus::new(
+    	acceptor, 
+    	if args.destination.ends_with("443") { sni_forwarder() } else { opaque_forwarder(&args.destination) });
 
     // Start listening for incoming connections
     nexus.register(&mut event_loop)
