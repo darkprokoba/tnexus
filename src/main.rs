@@ -1,4 +1,5 @@
 extern crate mio;
+extern crate bytes;
 
 #[macro_use]
 extern crate log;
@@ -10,7 +11,7 @@ use std::net::SocketAddr;
 use mio::*;
 use mio::tcp::{TcpListener, TcpStream};
 use mio::util::Slab;
-use mio::buf::RingBuf;
+use bytes::buf::{Buf, RingBuf};
 
 //const BUF_SIZE: usize = 524288; //131072;
 //const BUF_SIZE: usize = 8388608;
@@ -96,7 +97,7 @@ impl Conn {
     fn register(&mut self, event_loop: &mut EventLoop<Nexus>)
                 -> io::Result<()> {
 
-        event_loop.register_opt(
+        event_loop.register(
             &self.sock,
             self.token,
             self.interest, 
@@ -335,7 +336,7 @@ impl Nexus {
     ///
     /// This keeps the registration details neatly tucked away inside of our implementation.
     fn register(&mut self, event_loop: &mut EventLoop<Nexus>) -> io::Result<()> {
-        event_loop.register_opt(
+        event_loop.register(
             &self.acceptor,
             self.token,
             EventSet::readable(),
@@ -371,10 +372,12 @@ impl Nexus {
                 return;
             }
         };
+        
+        let inbound_stream = inbound.0;
 
         match self.conns.insert_with(|token| {
             debug!("Inserting {:?} into slab", token);
-            Flow::new(inbound, /*outbound,*/ token)
+            Flow::new(inbound_stream, /*outbound,*/ token)
         }) {
             Some(token) => {
                 match self.find_connection_by_token(token).inb.register(event_loop) {
