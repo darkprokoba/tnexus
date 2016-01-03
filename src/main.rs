@@ -1,5 +1,6 @@
 extern crate mio;
 extern crate bytes;
+extern crate toml;
 
 #[macro_use]
 extern crate log;
@@ -12,10 +13,6 @@ use mio::*;
 use mio::tcp::{TcpListener, TcpStream};
 use mio::util::Slab;
 use bytes::buf::{Buf, RingBuf};
-
-//const BUF_SIZE: usize = 524288; //131072;
-//const BUF_SIZE: usize = 8388608;
-const BUF_SIZE: usize = 1048576;
 
 const INVALID: Token = Token(0);
 const ACCEPTOR: Token = Token(1);
@@ -75,18 +72,21 @@ struct Nexus {
     // a list of all inbound and outbound connections
     conns: Slab<Flow>,
 
+    // size for the buffer between the inbound/outbound streams 
+    bufsize: usize,
+
     multiplexer: Box<Multiplexer>,
 }
 
 impl Conn {
-    fn new(token: Token, sock: TcpStream) -> Conn {
+    fn new(token: Token, sock: TcpStream, bufsize: usize) -> Conn {
         Conn {
             sock: sock,
             token: token,
             interest: EventSet::all(),
             dead: false,
             writable: false,
-            buf: RingBuf::new(BUF_SIZE),
+            buf: RingBuf::new(bufsize),
         }
     }
 
@@ -120,16 +120,16 @@ impl Conn {
 
 impl Flow {
 
-    fn new(insock: TcpStream, /*ousock: TcpStream,*/ token: Token) -> Flow {
+    fn new(insock: TcpStream, /*ousock: TcpStream,*/ token: Token, bufsize: usize) -> Flow {
         Flow {
-            inb: Conn::new(token, insock),
-            out: None, //Conn::new(Token(OUTMASK + token.as_usize()), ousock),
+            inb: Conn::new(token, insock, bufsize),
+            out: None,
         }
     }
 
-    fn set_outbound2(&mut self, outbound: TcpStream, event_loop: &mut EventLoop<Nexus>) -> bool {
+    fn set_outbound(&mut self, outbound: TcpStream, bufsize: usize, event_loop: &mut EventLoop<Nexus>) -> bool {
     
-        let mut out_conn = Conn::new(Token(OUTMASK + self.inb.token.as_usize()), outbound);
+        let mut out_conn = Conn::new(Token(OUTMASK + self.inb.token.as_usize()), outbound, bufsize);
         out_conn.register(event_loop).ok().expect("TODO: handle registration failure");
         self.out = Some(out_conn);
 
@@ -138,7 +138,7 @@ impl Flow {
         true
     }
 
-    fn read0(&mut self, multiplexer: &Box<Multiplexer>, event_loop: &mut EventLoop<Nexus>) -> bool {
+    fn read0(&mut self, bufsize: usize, multiplexer: &Box<Multiplexer>, event_loop: &mut EventLoop<Nexus>) -> bool {
     loop {
         match self.inb.sock.try_read_buf(&mut self.inb.buf) {
             Ok(Some(0)) => {
@@ -159,7 +159,7 @@ impl Flow {
                         return false;
                     },
                     MR::Match(destination) => {
-                        return self.set_outbound2(destination, event_loop);
+                        return self.set_outbound(destination, bufsize, event_loop);
                     },
                 }
                 
@@ -184,13 +184,13 @@ impl Flow {
     /// Handle flow read event from event loop.
     ///
     #[inline]
-    fn read(&mut self, inbo: bool, multiplexer: &Box<Multiplexer>, event_loop: &mut EventLoop<Nexus>) -> bool {
+    fn read(&mut self, inbo: bool, bufsize: usize, multiplexer: &Box<Multiplexer>, event_loop: &mut EventLoop<Nexus>) -> bool {
 
         if inbo {
             match self.out {
                 Some(ref mut peer) => read1(&mut self.inb, peer, event_loop),
                 None => {
-                    self.read0(multiplexer, event_loop)
+                    self.read0(bufsize, multiplexer, event_loop)
                 },
             }
         } else {
@@ -314,7 +314,7 @@ fn write1(conn: &mut Conn, peer: &mut Conn, event_loop: &mut EventLoop<Nexus>) -
 }
 
 impl Nexus {
-    fn new(acceptor: TcpListener, multiplexer: Box<Multiplexer>) -> Nexus {
+    fn new(acceptor: TcpListener, bufsize: usize, multiplexer: Box<Multiplexer>) -> Nexus {
         Nexus {
             acceptor: acceptor,
 
@@ -327,6 +327,8 @@ impl Nexus {
             // SERVER is Token(1), so start after that
             // we can deal with a max of 126 connections
             conns: Slab::new_starting_at(FLOW, 128),
+
+            bufsize: bufsize,
 
             multiplexer: multiplexer,
         }
@@ -375,9 +377,11 @@ impl Nexus {
         
         let inbound_stream = inbound.0;
 
+        let bufsize = self.bufsize;
+
         match self.conns.insert_with(|token| {
             debug!("Inserting {:?} into slab", token);
-            Flow::new(inbound_stream, /*outbound,*/ token)
+            Flow::new(inbound_stream, token, bufsize)
         }) {
             Some(token) => {
                 match self.find_connection_by_token(token).inb.register(event_loop) {
@@ -391,7 +395,7 @@ impl Nexus {
                         match mr {
                             MR::Match(outbound) => {
                                 //setup outbound immediately!
-                                self.find_connection_by_token(token).set_outbound2(outbound, event_loop);
+                                self.find_connection_by_token(token).set_outbound(outbound, bufsize, event_loop);
                             },
                             _ => (),
                         }
@@ -489,7 +493,7 @@ impl Handler for Nexus {
                         false
                     },
                     Some(flow) => {
-                        if flow.read(inb, &self.multiplexer, event_loop) {
+                        if flow.read(inb, self.bufsize, &self.multiplexer, event_loop) {
                             false
                         } else {
                             warn!("Read returned false for token: {:?}", token);
@@ -525,7 +529,8 @@ fn main() {
         .ok().expect("Could not initialize MIO event loop");
 
     let mut nexus = Nexus::new(
-        acceptor, 
+        acceptor,
+        args.bufsize,
         if args.destination.ends_with("443") { sni_forwarder() } else { opaque_forwarder(&args.destination) });
 
     // Start listening for incoming connections
