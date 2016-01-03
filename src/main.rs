@@ -27,7 +27,7 @@ mod config;
 mod tls;
 mod multiplex;
 
-use multiplex::{Multiplexer, MR, opaque_forwarder, sni_forwarder};
+use multiplex::{Multiplexer, MR};
 
 struct Conn {
     // socket
@@ -531,7 +531,7 @@ fn main() {
     let mut nexus = Nexus::new(
         acceptor,
         args.bufsize,
-        if args.destination.ends_with("443") { sni_forwarder() } else { opaque_forwarder(&args.destination) });
+        args.destination);
 
     // Start listening for incoming connections
     nexus.register(&mut event_loop)
