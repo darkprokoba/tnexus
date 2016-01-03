@@ -23,7 +23,7 @@ const NOTMASK: usize = !OUTMASK;
 
 const EMPTY_BUF: [u8; 0] = []; 
 
-mod cmdline;
+mod config;
 mod tls;
 mod multiplex;
 
@@ -515,7 +515,7 @@ fn main() {
 
     info!("Starting tnexus...");
     
-    let args = cmdline::get_args();
+    let args = config::get_args();
 
     let endpoint_addr: SocketAddr = args.listen.parse()
         .ok().expect("Failed to parse server enpoint");
