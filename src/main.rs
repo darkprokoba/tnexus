@@ -75,7 +75,7 @@ struct Nexus {
     // a list of all inbound and outbound connections
     conns: Slab<Flow>,
 
-	multiplexer: Box<Multiplexer>,
+    multiplexer: Box<Multiplexer>,
 }
 
 impl Conn {
@@ -102,7 +102,7 @@ impl Conn {
             self.token,
             self.interest, 
             PollOpt::edge())
-	}
+    }
                 
     /// Re-register flow interest in read events with the event_loop.
     #[inline]
@@ -128,18 +128,18 @@ impl Flow {
     }
 
     fn set_outbound2(&mut self, outbound: TcpStream, event_loop: &mut EventLoop<Nexus>) -> bool {
-    	
+    
         let mut out_conn = Conn::new(Token(OUTMASK + self.inb.token.as_usize()), outbound);
         out_conn.register(event_loop).ok().expect("TODO: handle registration failure");
         self.out = Some(out_conn);
 
         self.inb.reregister(event_loop).ok().expect("TODO: handle reregistration failure");
 
-    	true
+        true
     }
 
     fn read0(&mut self, multiplexer: &Box<Multiplexer>, event_loop: &mut EventLoop<Nexus>) -> bool {
-   	loop {
+    loop {
         match self.inb.sock.try_read_buf(&mut self.inb.buf) {
             Ok(Some(0)) => {
                 debug!("[read0] Successful read of zero bytes (i.e. EOF) from token {:?}", self.inb.token);
@@ -147,20 +147,20 @@ impl Flow {
                 return false;
             },
             Ok(Some(n)) => {
-            	let remaining = <RingBuf as Buf>::remaining(&self.inb.buf);
+            let remaining = <RingBuf as Buf>::remaining(&self.inb.buf);
                 debug!("[read0] Successfully read {} bytes from {:?}, buf size: {}",
                        n, self.inb.token, remaining);
                 
                 match multiplexer(&self.inb.buf.bytes()) {
-                	MR::NeedMore => (), //continue reading
-                	MR::Mismatch => {
-    					debug!("[read0] Connection unrecognized, aborting!");
-		                self.inb.dead = true;
-    					return false;
-                	},
-                	MR::Match(destination) => {
-                		return self.set_outbound2(destination, event_loop);
-                	},
+                    MR::NeedMore => (), //continue reading
+                    MR::Mismatch => {
+                        debug!("[read0] Connection unrecognized, aborting!");
+                        self.inb.dead = true;
+                        return false;
+                    },
+                    MR::Match(destination) => {
+                        return self.set_outbound2(destination, event_loop);
+                    },
                 }
                 
                 if self.inb.buf.is_full() {
@@ -175,7 +175,7 @@ impl Flow {
             Err(e) => {
                 warn!("Read failure {:?} on token {:?}", e, self.inb.token);
                 self.inb.dead = true;
-	            return false;
+                return false;
             }
         }
     }
@@ -188,16 +188,16 @@ impl Flow {
 
         if inbo {
             match self.out {
-            	Some(ref mut peer) => read1(&mut self.inb, peer, event_loop),
-            	None => {
-            		self.read0(multiplexer, event_loop)
-            	},
+                Some(ref mut peer) => read1(&mut self.inb, peer, event_loop),
+                None => {
+                    self.read0(multiplexer, event_loop)
+                },
             }
         } else {
             let peer = &mut self.inb;
             match self.out {
-            	Some(ref mut conn) => read1(conn, peer, event_loop),
-            	None => panic!("[read] For outbound connections, self.out can never be None")
+                Some(ref mut conn) => read1(conn, peer, event_loop),
+                None => panic!("[read] For outbound connections, self.out can never be None")
             }
         }
 
@@ -207,25 +207,25 @@ impl Flow {
     fn write(&mut self, inbo: bool, event_loop: &mut EventLoop<Nexus>) -> bool {
         if inbo {
             let conn = &mut self.inb;
-	        conn.writable = true;
+            conn.writable = true;
             match self.out {
-            	Some(ref mut peer) => {
-            		write1(conn, peer, event_loop)
-            	},
-            	None => {
-            		debug!("inbound {:?} is writable, but outbound not ready yet", conn.token);
-            		//conn.reregister(event_loop);
-            		true
-            	},
+                Some(ref mut peer) => {
+                    write1(conn, peer, event_loop)
+                },
+                None => {
+                    debug!("inbound {:?} is writable, but outbound not ready yet", conn.token);
+                    //conn.reregister(event_loop);
+                    true
+                },
             }
         } else {
             let peer = &mut self.inb;
             match self.out {
-            	Some(ref mut conn) => {
-            		conn.writable = true;
-            		write1(conn, peer, event_loop)
-            	},
-            	None => panic!("[write] For outbound connections, self.out can never be None")
+                Some(ref mut conn) => {
+                    conn.writable = true;
+                    write1(conn, peer, event_loop)
+                },
+                None => panic!("[write] For outbound connections, self.out can never be None")
             }
         }
     }
@@ -238,8 +238,8 @@ fn read1(conn: &mut Conn, peer: &mut Conn, event_loop: &mut EventLoop<Nexus>) ->
                 debug!("Successful read of zero bytes (i.e. EOF) from token {:?}", conn.token);
                 conn.dead = true;
                 if peer.dead == true && conn.buf.is_empty() && peer.buf.is_empty() {
-                	//we're all done:
-                	debug!("All done {:?}", conn.token);
+                    //we're all done:
+                    debug!("All done {:?}", conn.token);
                     return false;
                 } else {
                     debug!("Suspending reads due to EOF for {:?}", conn.token);
@@ -249,7 +249,7 @@ fn read1(conn: &mut Conn, peer: &mut Conn, event_loop: &mut EventLoop<Nexus>) ->
                 }
             },
             Ok(Some(n)) => {
-            	let remaining = <RingBuf as Buf>::remaining(&conn.buf);
+                let remaining = <RingBuf as Buf>::remaining(&conn.buf);
                 debug!("Successfully read {} bytes from {:?}, buf size: {}",
                        n, conn.token, remaining);
 
@@ -272,7 +272,7 @@ fn read1(conn: &mut Conn, peer: &mut Conn, event_loop: &mut EventLoop<Nexus>) ->
                 conn.dead = true;
                 conn.interest = conn.interest & !EventSet::readable();
                 conn.reregister(event_loop).ok().expect("TODO: handle re-registration failure");
-	            return true;
+                return true;
             }
         }
     }
@@ -385,15 +385,15 @@ impl Nexus {
                         debug!("Registered inbound token {:?}", token);
 
                         let mr = {
-	                        let plexer = &self.multiplexer;
-	                        plexer(&EMPTY_BUF)
+                            let plexer = &self.multiplexer;
+                            plexer(&EMPTY_BUF)
                         };
                         match mr {
-                        	MR::Match(outbound) => {
-                        		//setup outbound immediately!
-                        		self.find_connection_by_token(token).set_outbound2(outbound, event_loop);
-                        	},
-                        	_ => (),
+                            MR::Match(outbound) => {
+                                //setup outbound immediately!
+                                self.find_connection_by_token(token).set_outbound2(outbound, event_loop);
+                            },
+                            _ => (),
                         }
                     },
                     Err(e) => {
@@ -483,24 +483,24 @@ impl Handler for Nexus {
             if ACCEPTOR == token {
                 self.accept(event_loop);
             } else {
-    	        let should_stop = match self.conns.get_mut(token) {
-				    None => {
-				        warn!("Ignoring non-existing readable token: {:?}", token);
-	                    false
-				    },
-				    Some(flow) => {
-				        if flow.read(inb, &self.multiplexer, event_loop) {
-				        	false
-				        } else {
-					        warn!("Read returned false for token: {:?}", token);
-				        	true
-				        }
-				    }
-				};
-    	        
-    	        if should_stop {
-    	        	self.stop_flow(token);
-    	        }
+                let should_stop = match self.conns.get_mut(token) {
+                    None => {
+                        warn!("Ignoring non-existing readable token: {:?}", token);
+                        false
+                    },
+                    Some(flow) => {
+                        if flow.read(inb, &self.multiplexer, event_loop) {
+                            false
+                        } else {
+                            warn!("Read returned false for token: {:?}", token);
+                            true
+                        }
+                    }
+                };
+            
+                if should_stop {
+                    self.stop_flow(token);
+                }
             }
         }
     }
@@ -511,7 +511,7 @@ fn main() {
 
     info!("Starting tnexus...");
     
-	let args = cmdline::get_args();
+    let args = cmdline::get_args();
 
     let endpoint_addr: SocketAddr = args.listen.parse()
         .ok().expect("Failed to parse server enpoint");
@@ -525,8 +525,8 @@ fn main() {
         .ok().expect("Could not initialize MIO event loop");
 
     let mut nexus = Nexus::new(
-    	acceptor, 
-    	if args.destination.ends_with("443") { sni_forwarder() } else { opaque_forwarder(&args.destination) });
+        acceptor, 
+        if args.destination.ends_with("443") { sni_forwarder() } else { opaque_forwarder(&args.destination) });
 
     // Start listening for incoming connections
     nexus.register(&mut event_loop)

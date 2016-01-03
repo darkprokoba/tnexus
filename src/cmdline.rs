@@ -7,14 +7,14 @@ pub struct Args {
 }
 
 pub fn get_args() -> Args {
-	let args: Vec<String> = args().collect();
+    let args: Vec<String> = args().collect();
 
     if args.len() < 3 {
         panic!("Usage: {} listen_ip:port destination_ip:port", args[0]);
     }
-    
+
     Args {
-    	listen: args[1].clone(),
-    	destination: args[2].clone(),
+        listen: args[1].clone(),
+        destination: args[2].clone(),
     }
 }
