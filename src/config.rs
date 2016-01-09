@@ -5,11 +5,10 @@ use std::collections::BTreeMap;
 
 use toml::{Parser, Value, Table};
 
-use multiplex::{Multiplexer, opaque_forwarder, sni_forwarder};
+use multiplex::{Multiplexer, FixedPlexer, SniPlexer};
 
 const BUF_SIZE: usize = 1048576;
 
-//#[derive(Debug)]
 pub struct Endpoint {
     pub bufsize: usize,
     pub listen: String,
@@ -17,14 +16,13 @@ pub struct Endpoint {
 }
 
 pub fn get_args() -> Endpoint {
-    
+
     let mut input = String::new();
     File::open(&"tnexus.toml").and_then(|mut f| {
             f.read_to_string(&mut input)
         }).unwrap();
-    let s: &str = &input[..]; 
 
-    match Parser::new(s).parse() {
+    match Parser::new(&input).parse() {
         None => {
             let args: Vec<String> = args().collect();
         
@@ -35,7 +33,7 @@ pub fn get_args() -> Endpoint {
             Endpoint {
                 bufsize: BUF_SIZE,
                 listen: args[1].clone(),
-                destination: opaque_forwarder(&args[2]),
+                destination: Box::new(FixedPlexer::new(&args[2])),
             }
         },
     	Some(value) => parse_toml(&value),
@@ -81,7 +79,7 @@ fn parse_listen(bufsize: usize, listens: &Vec<Value>) -> Endpoint {
         		    Endpoint {
                         bufsize: bufsize,
                         listen: endpoint,
-                        destination: sni_forwarder(default, sni_map)
+                        destination: Box::new(SniPlexer::new(&default, sni_map))
         		    }
 		        },
 		        _ => {
@@ -91,7 +89,7 @@ fn parse_listen(bufsize: usize, listens: &Vec<Value>) -> Endpoint {
         		    Endpoint {
                         bufsize: bufsize,
                         listen: endpoint,
-                        destination: opaque_forwarder(&destination)
+                        destination: Box::new(FixedPlexer::new(&destination))
         		    }
 		        }
 		    }

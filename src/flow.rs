@@ -115,7 +115,7 @@ impl Flow {
                 debug!("[read0] Successfully read {} bytes from {:?}, buf size: {}",
                        n, self.inb.token, remaining);
                 
-                match multiplexer(&self.inb.buf.bytes()) {
+                match multiplexer.destination(&self.inb.buf.bytes()) {
                     MR::NeedMore => (), //continue reading
                     MR::Mismatch => {
                         debug!("[read0] Connection unrecognized, aborting!");

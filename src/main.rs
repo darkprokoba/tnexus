@@ -123,8 +123,7 @@ impl Nexus {
                         debug!("Registered inbound token {:?}", token);
 
                         let mr = {
-                            let plexer = &self.multiplexer;
-                            plexer(&EMPTY_BUF)
+                            self.multiplexer.destination(&EMPTY_BUF)
                         };
                         match mr {
                             MR::Match(outbound) => {
