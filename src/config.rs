@@ -5,6 +5,7 @@ use std::collections::BTreeMap;
 
 use toml::{Parser, Value, Table};
 
+use api::Api;
 use multiplex::{Multiplexer, FixedPlexer, SniPlexer};
 
 const BUF_SIZE: usize = 1048576;
@@ -73,9 +74,18 @@ fn parse_listen(bufsize: usize, listens: &Vec<Value>) -> Endpoint {
 		    match t.get("multiplex") {
 		        Some(&Value::Table(ref mt)) => {
 		            let default = get_str_attr("sni_missing", t);
-		            let sni_map = get_sni_map(mt);
+		            let mut sni_map = get_sni_map(mt);
+
+                    let api_key = get_str("api_key", t);
+                    if api_key.is_some() {
+                        let api_cert = get_str_attr("api_cert", t);
+                        let api_authorized_cert = get_str_attr("api_authorized_cert", t);
+            	        let api_addr = Api::new(&api_key.unwrap(), &api_cert, &api_authorized_cert).spawn();
+            	        sni_map.insert("tnexus.net".to_string(), format!("127.0.0.1:{}", api_addr.port()));
+                    }
+
         		    debug!("[{}] Forwarding {} to {:?}", name, endpoint, sni_map);
-		            
+
         		    Endpoint {
                         bufsize: bufsize,
                         listen: endpoint,
@@ -99,9 +109,14 @@ fn parse_listen(bufsize: usize, listens: &Vec<Value>) -> Endpoint {
 }
 
 fn get_str_attr(attr: &str, table: &Table) -> String {
+    get_str(attr, table).expect(
+        &format!("Invalid configration file: No String({}) attribute in {:?}", attr, table))
+}
+
+fn get_str(attr: &str, table: &Table) -> Option<String> {
     match table.get(attr) {
-        Some(&Value::String(ref result)) => result.clone(),
-        _ => panic!("Invalid configration file: No String({}) attribute in {:?}", attr, table),
+        Some(&Value::String(ref result)) => Some(result.clone()),
+        _ => None,
     }
 }
 

@@ -1,6 +1,8 @@
 extern crate mio;
 extern crate bytes;
 extern crate toml;
+extern crate openssl;
+extern crate hyper;
 
 #[macro_use]
 extern crate log;
@@ -22,6 +24,7 @@ const NOTMASK: usize = !OUTMASK;
 
 const EMPTY_BUF: [u8; 0] = []; 
 
+mod api;
 mod config;
 mod tls;
 mod multiplex;
@@ -247,7 +250,7 @@ fn main() {
     env_logger::init().ok().expect("Failed to init logger");
 
     info!("Starting tnexus...");
-    
+
     let args = config::get_args();
 
     let endpoint_addr: SocketAddr = args.listen.parse()

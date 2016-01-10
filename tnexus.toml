@@ -4,12 +4,11 @@
 
 [global]
 bufsize = 1048576
-#apicert = <base64_cert>
 
-[[listen]]
-name = "ssh"
-endpoint = "127.0.0.1:6665"
-destination = "127.0.0.1:22"
+#[[listen]]
+#name = "ssh"
+#endpoint = "127.0.0.1:6665"
+#destination = "127.0.0.1:22"
 
 [[listen]]
 name = "tls"
@@ -17,7 +16,10 @@ endpoint = "127.0.0.1:6666"
 sni_missing = "127.0.0.1:443"
 sni_mismatch = "127.0.0.1:443"
 
-#whether API requests are allowed on this endpoint
-api = false
+#If api_key is given, api_cert and api_authorized_cert must also be given.
+#If api_key is not present, this endpoint will not include an API listener.
+api_key = "ssl/api_key.pem"
+api_cert = "ssl/api_cert.pem"
+api_authorized_cert = "ssl/client_cert.pem"
 
 multiplex = { "www.redhat.com" = "23.45.109.223:443", "news.ycombinator.com" = "198.41.191.47:443" }
