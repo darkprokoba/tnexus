@@ -253,6 +253,8 @@ fn main() {
 
     let args = config::get_args();
 
+    debug!("args: {:?}", args);
+
     let endpoint_addr: SocketAddr = args.listen.parse()
         .ok().expect("Failed to parse server enpoint");
 

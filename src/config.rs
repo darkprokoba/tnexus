@@ -10,6 +10,7 @@ use multiplex::{Multiplexer, FixedPlexer, SniPlexer};
 
 const BUF_SIZE: usize = 1048576;
 
+#[derive(Debug)]
 pub struct Endpoint {
     pub bufsize: usize,
     pub listen: String,

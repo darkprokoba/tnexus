@@ -1,6 +1,7 @@
 use std::net::SocketAddr;
 use mio::tcp::TcpStream;
 use std::collections::BTreeMap;
+use std::fmt::Debug;
 
 use tls;
 
@@ -10,7 +11,7 @@ pub enum MR {
     Match(TcpStream),
 }
 
-pub trait Multiplexer {
+pub trait Multiplexer : Debug {
     fn destination(&self, &[u8]) -> MR;
 }
 
