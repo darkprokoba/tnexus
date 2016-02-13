@@ -9,6 +9,8 @@ extern crate log;
 
 extern crate env_logger;
 
+extern crate rustc_serialize;
+
 use std::io;
 use std::net::SocketAddr;
 use mio::*;
@@ -31,6 +33,8 @@ mod multiplex;
 mod flow;
 
 use multiplex::{Multiplexer, MR};
+
+use api::ApiMsg;
 
 use flow::Flow;
 
@@ -180,7 +184,20 @@ impl Nexus {
 
 impl Handler for Nexus {
     type Timeout = ();
-    type Message = ();
+    type Message = ApiMsg;
+
+    fn notify(&mut self, _: &mut EventLoop<Nexus>, msg: ApiMsg) {
+        match msg {
+            ApiMsg::SniRequest(tx) => {
+                let send_result = tx.send(ApiMsg::SniResponse(256u32));
+                if send_result.is_err() {
+                    error!("Failed responding to ApiMsg");
+                }
+            },
+            _ => warn!("Bad request from API"),
+        }
+        //event_loop.shutdown();
+    }
 
     fn ready(&mut self, event_loop: &mut EventLoop<Nexus>, _token: Token, events: EventSet) {
         assert!(_token != INVALID, "[BUG]: Received event for Token(0)");
@@ -251,7 +268,13 @@ fn main() {
 
     info!("Starting tnexus...");
 
-    let args = config::get_args();
+    // Create an event loop
+    let mut event_loop = EventLoop::new()
+        .ok().expect("Could not initialize MIO event loop");
+        
+    let main_channel = event_loop.channel();
+    
+    let args = config::configure(main_channel);
 
     debug!("args: {:?}", args);
 
@@ -261,10 +284,6 @@ fn main() {
     // Setup the acceptor socket
     let acceptor = TcpListener::bind(&endpoint_addr)
         .ok().expect("Failed to bind server endpoint");
-
-    // Create an event loop
-    let mut event_loop = EventLoop::new()
-        .ok().expect("Could not initialize MIO event loop");
 
     let mut nexus = Nexus::new(
         acceptor,

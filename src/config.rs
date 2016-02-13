@@ -3,9 +3,12 @@ use std::fs::File;
 use std::io::Read;
 use std::collections::BTreeMap;
 
+use mio::Sender;
+
 use toml::{Parser, Value, Table};
 
 use api::Api;
+use api::ApiMsg;
 use multiplex::{Multiplexer, FixedPlexer, SniPlexer};
 
 const BUF_SIZE: usize = 1048576;
@@ -17,7 +20,7 @@ pub struct Endpoint {
     pub destination: Box<Multiplexer>,
 }
 
-pub fn get_args() -> Endpoint {
+pub fn configure(main_channel: Sender<ApiMsg>) -> Endpoint {
 
     let mut input = String::new();
     File::open(&"tnexus.toml").and_then(|mut f| {
@@ -38,12 +41,12 @@ pub fn get_args() -> Endpoint {
                 destination: Box::new(FixedPlexer::new(&args[2])),
             }
         },
-    	Some(value) => parse_toml(&value),
+    	Some(value) => parse_toml(&value, main_channel),
     }
 
 }
 
-fn parse_toml(value: &Table) -> Endpoint {
+fn parse_toml(value: &Table, main_channel: Sender<ApiMsg>) -> Endpoint {
     debug!("{:?}", value);
 
 	let bufsize = match value.get("global") {
@@ -55,12 +58,12 @@ fn parse_toml(value: &Table) -> Endpoint {
 	}.unwrap_or(BUF_SIZE);
 	
 	match value.get("listen") {
-	    Some(&Value::Array(ref a)) => parse_listen(bufsize, a),
+	    Some(&Value::Array(ref a)) => parse_listen(bufsize, a, main_channel),
 	    _ => panic!("[[listen]] sections not found in config file!")
 	}
 }
 
-fn parse_listen(bufsize: usize, listens: &Vec<Value>) -> Endpoint {
+fn parse_listen(bufsize: usize, listens: &Vec<Value>, main_channel: Sender<ApiMsg>) -> Endpoint {
     if listens.is_empty() {
         panic!("Invalid configuration file: empty [[listen]] section!");
     }
@@ -81,7 +84,8 @@ fn parse_listen(bufsize: usize, listens: &Vec<Value>) -> Endpoint {
                     if api_key.is_some() {
                         let api_cert = get_str_attr("api_cert", t);
                         let api_authorized_cert = get_str_attr("api_authorized_cert", t);
-            	        let api_addr = Api::new(&api_key.unwrap(), &api_cert, &api_authorized_cert).spawn();
+                        let api = Api::new(&api_key.unwrap(), &api_cert, &api_authorized_cert, main_channel);
+            	        let api_addr = api.spawn();
             	        sni_map.insert("tnexus.net".to_string(), format!("127.0.0.1:{}", api_addr.port()));
                     }
 
@@ -90,7 +94,7 @@ fn parse_listen(bufsize: usize, listens: &Vec<Value>) -> Endpoint {
         		    Endpoint {
                         bufsize: bufsize,
                         listen: endpoint,
-                        destination: Box::new(SniPlexer::new(&default, sni_map))
+                        destination: Box::new(SniPlexer::new(&default, sni_map)),
         		    }
 		        },
 		        _ => {
@@ -100,7 +104,7 @@ fn parse_listen(bufsize: usize, listens: &Vec<Value>) -> Endpoint {
         		    Endpoint {
                         bufsize: bufsize,
                         listen: endpoint,
-                        destination: Box::new(FixedPlexer::new(&destination))
+                        destination: Box::new(FixedPlexer::new(&destination)),
         		    }
 		        }
 		    }

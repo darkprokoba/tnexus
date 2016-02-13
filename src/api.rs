@@ -1,16 +1,21 @@
 use std::thread;
 use std::sync::Arc;
+use std::sync::mpsc::channel;
+use std::sync::mpsc::Sender;
 use std::path::Path;
 use std::net::SocketAddr;
 use std::error::Error;
 use std::fs::File;
 
 use hyper::Server;
+use hyper::server::Handler;
 use hyper::server::Request;
 use hyper::server::Response;
 use hyper::net::HttpsListener;
 use hyper::net::NetworkListener;
 use hyper::net::Openssl;
+use hyper::header::ContentType;
+use hyper::mime::{Mime, TopLevel, SubLevel, Attr, Value};
 
 use openssl::ssl::{SslContext, SSL_OP_NO_TLSV1, SSL_OP_NO_TLSV1_1, SslMethod, SSL_VERIFY_PEER, SSL_VERIFY_FAIL_IF_NO_PEER_CERT};
 use openssl::x509::X509;
@@ -19,26 +24,43 @@ use openssl::x509::X509StoreContext;
 use openssl::ssl::error::SslError;
 use openssl::nid::Nid;
 
+use mio::Sender as MioSender;
+
+use rustc_serialize::json;
+
 //const CIPHERS: &'static str = "DEFAULT";
 const CIPHERS: &'static str = "AES256-GCM-SHA384:AES256-SHA256:AES256-SHA:CAMELLIA256-SHA";
+
+pub enum ApiMsg {
+    SniRequest(Sender<ApiMsg>),
+    SniResponse(u32),
+}
+
+#[derive(RustcEncodable)]
+pub struct ExampleResponse {
+    data1: u32,
+    data2: String,
+}
 
 #[derive(Debug)]
 pub struct Api {
     key_path: String,
     cert_path: String,
     client_cert_path: String,
+    main_channel: MioSender<ApiMsg>,
 }
 
 impl Api {
-    pub fn new(key: &str, cert: &str, client_cert: &str) -> Api {
+    pub fn new(key: &str, cert: &str, client_cert: &str, main_channel: MioSender<ApiMsg>) -> Api {
         Api {
             key_path: key.to_string(),
             cert_path: cert.to_string(),
             client_cert_path: client_cert.to_string(),
+            main_channel: main_channel,
         }
     }
 
-    pub fn spawn(&self) -> SocketAddr {
+    pub fn spawn(self) -> SocketAddr {
         //let api = Api::new("api_key.pem", "api_cert.pem", "client_cert.pem");
         info!("Starting api endpoint: {:?}", self);
         //Openssl::with_cert_and_key
@@ -54,15 +76,42 @@ impl Api {
         info!("API listeneing on {:?}", local_addr);
     
         thread::spawn(move || {
-            server.handle_threads(hello, 1).unwrap();
+            server.handle_threads(self, 1).unwrap();
         });
         
         local_addr
     }
 }
 
-fn hello(_: Request, res: Response) {
-    res.send(b"Hello World!").unwrap();
+impl Handler for Api {
+    fn handle(&self, _: Request, mut res: Response) {
+        let (tx, rx) = channel();
+        let send_result = self.main_channel.send(ApiMsg::SniRequest(tx));
+        if send_result.is_err() {
+            println!("Error talking to main event_loop");
+            res.send(b"Error talking to main event_loop").unwrap();
+        } else {
+            let response: ApiMsg = rx.recv().unwrap();
+            let rex = match response {
+                ApiMsg::SniResponse(rex) => rex,
+                _ => 0u32,
+            };
+
+			let object = ExampleResponse {
+			    data1: rex,
+			    data2: "Hello World".to_string(),
+			};
+            
+            let encoded = json::encode(&object).unwrap();
+            
+            res.headers_mut().set(ContentType(Mime(
+                    TopLevel::Application, 
+                    SubLevel::Json, 
+                    vec![(Attr::Charset, Value::Utf8)])));
+
+            res.send(encoded.as_bytes()).unwrap();
+        }
+    }
 }
 
 fn ctx<C, K>(cert: C, key: K, client_cert: Vec<u8>) -> Result<Openssl, SslError> 
