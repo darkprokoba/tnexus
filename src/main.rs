@@ -34,7 +34,7 @@ use multiplex::{Multiplexer, MR};
 
 use flow::Flow;
 
-struct Nexus {
+pub struct Nexus {
     // main server socket (that accepts inbound connections)
     acceptor: TcpListener,
 
