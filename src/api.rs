@@ -11,11 +11,13 @@ use hyper::Server;
 use hyper::server::Handler;
 use hyper::server::Request;
 use hyper::server::Response;
+use hyper::status::StatusCode;
 use hyper::net::HttpsListener;
 use hyper::net::NetworkListener;
 use hyper::net::Openssl;
 use hyper::header::ContentType;
 use hyper::mime::{Mime, TopLevel, SubLevel, Attr, Value};
+use hyper::uri::RequestUri;
 
 use openssl::ssl::{SslContext, SSL_OP_NO_TLSV1, SSL_OP_NO_TLSV1_1, SslMethod, SSL_VERIFY_PEER, SSL_VERIFY_FAIL_IF_NO_PEER_CERT};
 use openssl::x509::X509;
@@ -86,32 +88,51 @@ impl Api {
     }
 }
 
+fn respond(mut res: Response, code: StatusCode, body: &[u8]) {
+    *res.status_mut() = code;
+    res.send(body).ok().expect("Could not send response!");
+}
+
 impl Handler for Api {
-    fn handle(&self, _: Request, mut res: Response) {
-        let (tx, rx) = channel();
-        let send_result = self.main_channel.send(ApiMsg::SniRequest(tx));
-        if send_result.is_err() {
-            println!("Error talking to main event_loop");
-            res.send(b"Error talking to main event_loop").unwrap();
-        } else {
-            let response: ApiMsg = rx.recv().unwrap();
-            let sni_map = match response {
-                ApiMsg::SniResponse(rex) => rex,
-                _ => BTreeMap::new(),
-            };
-
-			let object = ExampleResponse {
-			    map: sni_map,
-			};
+    fn handle(&self, req: Request, mut res: Response) {
+        match req.uri {
+            RequestUri::AbsolutePath(path) => {
+                info!("{}", path);
+                let (tx, rx) = channel();
+                if path == "/" {
+                    let send_result = self.main_channel.send(ApiMsg::SniRequest(tx));
+                    if send_result.is_err() {
+                        println!("Error talking to main event_loop");
+                        respond(res, StatusCode::InternalServerError, b"Error talking to main event_loop");
+                    } else {
+                        let response: ApiMsg = rx.recv().unwrap();
+                        let sni_map = match response {
+                            ApiMsg::SniResponse(rex) => rex,
+                            _ => BTreeMap::new(),
+                        };
             
-            let encoded = json::encode(&object).unwrap();
+            			let object = ExampleResponse {
+            			    map: sni_map,
+            			};
+                        
+                        let encoded = json::encode(&object).unwrap();
+                        
+                        res.headers_mut().set(ContentType(Mime(
+                                TopLevel::Application, 
+                                SubLevel::Json, 
+                                vec![(Attr::Charset, Value::Utf8)])));
             
-            res.headers_mut().set(ContentType(Mime(
-                    TopLevel::Application, 
-                    SubLevel::Json, 
-                    vec![(Attr::Charset, Value::Utf8)])));
-
-            res.send(encoded.as_bytes()).unwrap();
+                        respond(res, StatusCode::Ok, encoded.as_bytes());
+                    }
+                } else if path == "/about" {
+                    respond(res, StatusCode::Ok, b"TODO: Implement me!"); 
+                } else {
+                    respond(res, StatusCode::NotFound, format!("Resource not found on server: {}", path).as_bytes());
+                }
+            },
+            _ => {
+                respond(res, StatusCode::BadRequest, b"Bad request");
+            }
         }
     }
 }
