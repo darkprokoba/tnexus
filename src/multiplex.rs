@@ -12,6 +12,7 @@ pub enum MR {
 
 pub trait Multiplexer : Debug {
     fn destination(&self, &[u8]) -> MR;
+    fn map(&self) -> BTreeMap<String, String>;
 }
 
 #[derive(Debug)]
@@ -36,6 +37,10 @@ impl FixedPlexer {
 impl Multiplexer for FixedPlexer {
     fn destination(&self, _buf: &[u8]) -> MR {
         MR::Match(self.destination_addr)
+    }
+    
+    fn map(&self) -> BTreeMap<String, String> {
+        BTreeMap::new()
     }
 }
 
@@ -67,4 +72,9 @@ impl Multiplexer for SniPlexer {
             },
         }
     }
+    
+    fn map(&self) -> BTreeMap<String, String> {
+        self.sni_map.clone()
+    }
+
 }

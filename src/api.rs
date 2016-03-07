@@ -24,6 +24,8 @@ use openssl::x509::X509StoreContext;
 use openssl::ssl::error::SslError;
 use openssl::nid::Nid;
 
+use std::collections::BTreeMap;
+
 use mio::Sender as MioSender;
 
 use rustc_serialize::json;
@@ -31,15 +33,16 @@ use rustc_serialize::json;
 //const CIPHERS: &'static str = "DEFAULT";
 const CIPHERS: &'static str = "AES256-GCM-SHA384:AES256-SHA256:AES256-SHA:CAMELLIA256-SHA";
 
+pub type SniMap = BTreeMap<String, String>;
+
 pub enum ApiMsg {
     SniRequest(Sender<ApiMsg>),
-    SniResponse(u32),
+    SniResponse(SniMap),
 }
 
 #[derive(RustcEncodable)]
 pub struct ExampleResponse {
-    data1: u32,
-    data2: String,
+    map: SniMap,
 }
 
 #[derive(Debug)]
@@ -92,14 +95,13 @@ impl Handler for Api {
             res.send(b"Error talking to main event_loop").unwrap();
         } else {
             let response: ApiMsg = rx.recv().unwrap();
-            let rex = match response {
+            let sni_map = match response {
                 ApiMsg::SniResponse(rex) => rex,
-                _ => 0u32,
+                _ => BTreeMap::new(),
             };
 
 			let object = ExampleResponse {
-			    data1: rex,
-			    data2: "Hello World".to_string(),
+			    map: sni_map,
 			};
             
             let encoded = json::encode(&object).unwrap();

@@ -193,7 +193,7 @@ impl Handler for Nexus {
     fn notify(&mut self, _: &mut EventLoop<Nexus>, msg: ApiMsg) {
         match msg {
             ApiMsg::SniRequest(tx) => {
-                let send_result = tx.send(ApiMsg::SniResponse(256u32));
+                let send_result = tx.send(ApiMsg::SniResponse(self.multiplexer.map()));
                 if send_result.is_err() {
                     error!("Failed responding to ApiMsg");
                 }
