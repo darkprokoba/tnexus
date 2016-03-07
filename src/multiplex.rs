@@ -1,5 +1,4 @@
 use std::net::SocketAddr;
-use mio::tcp::TcpStream;
 use std::collections::BTreeMap;
 use std::fmt::Debug;
 
@@ -8,7 +7,7 @@ use tls;
 pub enum MR {
     NeedMore,
     Mismatch,
-    Match(TcpStream),
+    Match(SocketAddr),
 }
 
 pub trait Multiplexer : Debug {
@@ -36,8 +35,7 @@ impl FixedPlexer {
 
 impl Multiplexer for FixedPlexer {
     fn destination(&self, _buf: &[u8]) -> MR {
-        MR::Match(TcpStream::connect(&self.destination_addr).ok().expect(
-            "TODO: outbound failure not handled yet"))
+        MR::Match(self.destination_addr)
     }
 }
 
@@ -63,8 +61,7 @@ impl Multiplexer for SniPlexer {
                         let destination_addr: SocketAddr = destination.parse()
                             .ok().expect("Failed to parse destination enpoint");
 
-                        MR::Match(TcpStream::connect(&destination_addr).ok().expect(
-                            "TODO: outbound connect failure not handled yet"))
+                        MR::Match(destination_addr)
                     },
                 }
             },

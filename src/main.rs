@@ -15,6 +15,7 @@ use std::io;
 use std::net::SocketAddr;
 use mio::*;
 use mio::tcp::TcpListener;
+use mio::tcp::TcpStream;
 use mio::util::Slab;
 
 const INVALID: Token = Token(0);
@@ -135,7 +136,10 @@ impl Nexus {
                         match mr {
                             MR::Match(outbound) => {
                                 //setup outbound immediately!
-                                self.find_connection_by_token(token).set_outbound(outbound, bufsize, event_loop);
+                                let outbound_stream = TcpStream::connect(&outbound).ok().expect(
+                            		"TODO: outbound connect failure not handled yet");
+
+                                self.find_connection_by_token(token).set_outbound(outbound_stream, bufsize, event_loop);
                             },
                             _ => (),
                         }

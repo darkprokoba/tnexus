@@ -123,7 +123,9 @@ impl Flow {
                         return false;
                     },
                     MR::Match(destination) => {
-                        return self.set_outbound(destination, bufsize, event_loop);
+                        let destination_stream = TcpStream::connect(&destination).ok().expect(
+                            		"TODO: outbound connect failure not handled yet");
+                        return self.set_outbound(destination_stream, bufsize, event_loop);
                     },
                 }
                 
