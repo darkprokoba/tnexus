@@ -8,6 +8,7 @@ use mio::Sender;
 use toml::{Parser, Value, Table};
 
 use api::Api;
+use api::RunningApi;
 use api::ApiMsg;
 use multiplex::{Multiplexer, FixedPlexer, SniPlexer};
 
@@ -18,6 +19,7 @@ pub struct Endpoint {
     pub bufsize: usize,
     pub listen: String,
     pub destination: Box<Multiplexer>,
+    pub api: Option<RunningApi>,
 }
 
 pub fn configure(main_channel: Sender<ApiMsg>) -> Endpoint {
@@ -39,6 +41,7 @@ pub fn configure(main_channel: Sender<ApiMsg>) -> Endpoint {
                 bufsize: BUF_SIZE,
                 listen: args[1].clone(),
                 destination: Box::new(FixedPlexer::new(&args[2])),
+                api: None,
             }
         },
     	Some(value) => parse_toml(&value, main_channel),
@@ -81,13 +84,16 @@ fn parse_listen(bufsize: usize, listens: &Vec<Value>, main_channel: Sender<ApiMs
 		            let mut sni_map = get_sni_map(mt);
 
                     let api_key = get_str("api_key", t);
-                    if api_key.is_some() {
+                    let running_api = if api_key.is_some() {
                         let api_cert = get_str_attr("api_cert", t);
                         let api_authorized_cert = get_str_attr("api_authorized_cert", t);
                         let api = Api::new(&api_key.unwrap(), &api_cert, &api_authorized_cert, main_channel);
-            	        let api_addr = api.spawn();
-            	        sni_map.insert("tnexus.net".to_string(), format!("127.0.0.1:{}", api_addr.port()));
-                    }
+            	        let running_api = api.spawn();
+            	        sni_map.insert("tnexus.net".to_string(), format!("127.0.0.1:{}", running_api.local_addr.port()));
+            	        Some(running_api)
+                    } else {
+                        None
+                    };
 
         		    debug!("[{}] Forwarding {} to {:?}", name, endpoint, sni_map);
 
@@ -95,6 +101,7 @@ fn parse_listen(bufsize: usize, listens: &Vec<Value>, main_channel: Sender<ApiMs
                         bufsize: bufsize,
                         listen: endpoint,
                         destination: Box::new(SniPlexer::new(&default, sni_map)),
+                        api: running_api,
         		    }
 		        },
 		        _ => {
@@ -105,6 +112,7 @@ fn parse_listen(bufsize: usize, listens: &Vec<Value>, main_channel: Sender<ApiMs
                         bufsize: bufsize,
                         listen: endpoint,
                         destination: Box::new(FixedPlexer::new(&destination)),
+                        api: None,
         		    }
 		        }
 		    }

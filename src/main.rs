@@ -190,13 +190,16 @@ impl Handler for Nexus {
     type Timeout = ();
     type Message = ApiMsg;
 
-    fn notify(&mut self, _: &mut EventLoop<Nexus>, msg: ApiMsg) {
+    fn notify(&mut self, evloop: &mut EventLoop<Nexus>, msg: ApiMsg) {
         match msg {
             ApiMsg::SniRequest(tx) => {
                 let send_result = tx.send(ApiMsg::SniResponse(self.multiplexer.map()));
                 if send_result.is_err() {
                     error!("Failed responding to ApiMsg");
                 }
+            },
+            ApiMsg::Quit(_) => {
+                evloop.shutdown();
             },
             _ => warn!("Bad request from API"),
         }
@@ -301,6 +304,14 @@ fn main() {
     // Start handling events
     event_loop.run(&mut nexus)
         .ok().expect("Failed to start event loop");
+
+    info!("Main loop complete.");
+    
+    if args.api.is_some() {
+        info!("Shutting down API...");
+        args.api.unwrap().thread_handle.close().ok().expect("Could not shutdown hyper API");
+        info!("Shutting down API: ok.");
+    }
 
     info!("Over.");
 }

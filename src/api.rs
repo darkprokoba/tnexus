@@ -1,4 +1,3 @@
-use std::thread;
 use std::sync::Arc;
 use std::sync::mpsc::channel;
 use std::sync::mpsc::Sender;
@@ -11,6 +10,7 @@ use hyper::Server;
 use hyper::server::Handler;
 use hyper::server::Request;
 use hyper::server::Response;
+use hyper::server::Listening;
 use hyper::status::StatusCode;
 use hyper::net::HttpsListener;
 use hyper::net::NetworkListener;
@@ -40,6 +40,7 @@ pub type SniMap = BTreeMap<String, String>;
 pub enum ApiMsg {
     SniRequest(Sender<ApiMsg>),
     SniResponse(SniMap),
+    Quit(Sender<ApiMsg>),
 }
 
 #[derive(RustcEncodable)]
@@ -47,12 +48,19 @@ pub struct ExampleResponse {
     map: SniMap,
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct Api {
     key_path: String,
     cert_path: String,
     client_cert_path: String,
     main_channel: MioSender<ApiMsg>,
+}
+
+#[derive(Debug)]
+pub struct RunningApi {
+    api: Api,
+    pub local_addr: SocketAddr,
+    pub thread_handle: Listening,
 }
 
 impl Api {
@@ -65,7 +73,7 @@ impl Api {
         }
     }
 
-    pub fn spawn(self) -> SocketAddr {
+    pub fn spawn(self) -> RunningApi {
         //let api = Api::new("api_key.pem", "api_cert.pem", "client_cert.pem");
         info!("Starting api endpoint: {:?}", self);
         //Openssl::with_cert_and_key
@@ -80,11 +88,14 @@ impl Api {
         let server = Server::new(listener);
         info!("API listeneing on {:?}", local_addr);
     
-        thread::spawn(move || {
-            server.handle_threads(self, 1).unwrap();
-        });
+        let self_clone = self.clone();
+        let listening = server.handle_threads(self_clone, 1).unwrap();
         
-        local_addr
+        RunningApi {
+            api: self,
+            local_addr: local_addr,
+            thread_handle: listening,
+        }
     }
 }
 
@@ -123,6 +134,15 @@ impl Handler for Api {
                                 vec![(Attr::Charset, Value::Utf8)])));
             
                         respond(res, StatusCode::Ok, encoded.as_bytes());
+                    }
+                } else if path == "/quit" {
+                    let send_result = self.main_channel.send(ApiMsg::Quit(tx));
+                    if send_result.is_err() {
+                        println!("Error sending Quit to main event_loop");
+                        respond(res, StatusCode::InternalServerError, b"Error sending Quit to main event_loop");
+                    } else {
+                        debug!("API shutdown not implemented!");
+                        respond(res, StatusCode::Ok, b"User-initiated exit.");
                     }
                 } else if path == "/about" {
                     respond(res, StatusCode::Ok, b"TODO: Implement me!"); 
